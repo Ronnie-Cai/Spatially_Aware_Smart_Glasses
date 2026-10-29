@@ -1,0 +1,4 @@
+# Compatible Windows wheel versions for the current Task 1 prototype.
+opencv-python==4.11.0.86
+websocket-client>=1.8.0,<2.0.0
+python-dotenv>=1.0.0,<2.0.0
