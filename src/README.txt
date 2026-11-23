@@ -1,129 +1,72 @@
-# Spatially_Aware_Smart_Glasses
+# Spatially Aware Smart Glasses — Repaired Pilot Pipeline
 
-A research prototype for the University of Macau CISC4000 FYP **Spatially Aware Multimodal AI Assistant for Smart Glasses**. This project replays recorded first-person videos to evaluate whether Qwen3.8-Omni-Flash-Realtime can retain a pending instruction and trigger a reminder when the corresponding visual condition appears.
+This version follows the FYP plan: one Qwen Realtime session per recording; an instruction supplied once; causal, chronological 2 FPS observations (one frame every 0.5 seconds); one `WAIT` or `TRIGGER: <reminder>` response after each frame; first-trigger one-shot stopping; and Precision / Recall / F1 / mean trigger latency.
 
-## Features
+## Files
 
-- Creates an independent Realtime API session for each video.
-- Sets a fixed monitoring prompt and sends the pending instruction once as a separate user text message.
-- Samples and replays video frames in chronological order, using 1 FPS by default.
-- Requests one `WAIT` / `TRIGGER` decision after each new frame.
-- Stops the one-shot evaluation after the first `TRIGGER`.
-- Saves per-frame predictions, raw API events, response times, and reported token-usage counters to JSONL.
-- Supports single-video runs and batch runs from a JSONL annotation file.
+- `src/evaluate_realtime.py`: record & replay first-person videos through Qwen Realtime WebSocket.
+- `src/evaluate_metrics.py`: score outputs against human annotations.
+- `test_pipeline.py`: offline logic tests, no API key required.
+- `dataset/annotations.example.jsonl`: example annotations; copy it to `dataset/annotations.jsonl` and change the actual video timestamps.
+- `.env.example`: configuration template; rename to `.env` and add your credentials.
 
-## Project Structure
+## Install (Python 3.10–3.12)
 
-```text
-project/
-├── .env
-├── README.md
-├── requirements.txt
-├── src/
-│   └── evaluate_realtime.py
-├── dataset/
-│   ├── annotations.jsonl         # Create locally; review before committing
-│   └── videos/                   # Local video files; excluded from Git
-└── results/                      # Experiment outputs; excluded from Git
-```
-
-## Requirements
-
-- Windows 10/11 (64-bit recommended).
-- Python 3.10–3.12 recommended.
-- An Alibaba Cloud Model Studio China workspace with the matching API key and Workspace ID.
-- A local recorded video, for example `dataset/videos/test.mp4`.
-
-## Setup
-
-### 1. Configure environment variables
-
-Copy `.env.example` to `.env` in the project root and fill in your own credentials:
-
-```dotenv
-DASHSCOPE_API_KEY=your_api_key
-DASHSCOPE_WORKSPACE_ID=your_beijing_workspace_id
-```
-
-Use the API key and Workspace ID belonging to the same Model Studio workspace/region. The exact region, model availability, quota, and endpoint configuration should be verified in the Alibaba Cloud console before running experiments.
-
-### 2. Install dependencies
-
-Open a VS Code terminal in the project root. Install dependencies in the same Python environment that you will use to run the script:
+From the directory containing this guide:
 
 ```powershell
 python -m pip install -r requirements.txt
+python test_pipeline.py
 ```
 
-Verify the main dependencies:
+Copy `.env.example` to `.env` and fill the `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` for the **same China (Beijing)** Model Studio workspace. Never share `.env` or API keys.
+
+## Single-video pilot
+
+Place an actual video at `dataset/videos/video_001.mp4`, then:
 
 ```powershell
-python -c "import cv2, websocket; print('OpenCV:', cv2.__version__); print('websocket-client: OK')"
+python src/evaluate_realtime.py --video dataset/videos/video_001.mp4 --video-id video_001 --instruction "When you see a restroom sign, remind me that there is a restroom nearby." --output results/pilot_predictions.jsonl
 ```
 
-If pip tries to build OpenCV from source on Windows, use a compatible prebuilt wheel, for example:
+The default `--instruction-mode session` puts the sample instruction once in `session.update.instructions` next to the fixed monitor prompt. The original `conversation.item.create` user-text path is available as `--instruction-mode user-item`, **experimental** until confirmed to work with the chosen Qwen model/API. Don't combine results from the two modes in the same main benchmark; document which one you used. Changing the session instruction means each session's system text is sample-specific, even though the monitoring rules stay identical.
+
+To run batch videos, copy the example annotations file, fill it with real annotations, then:
 
 ```powershell
-python -m pip install --only-binary=:all: "opencv-python==4.11.0.86"
+python src/evaluate_realtime.py --annotations dataset/annotations.jsonl --video-dir dataset/videos --output results/pilot_predictions.jsonl
 ```
 
-### 3. Prepare a video
+Additional options: `--fps 2` (default), `--timeout 90`, `--no-realtime-pacing` (process sequential frames without waiting for original timestamps), and `--instruction-mode user-item`.
 
-Place a video you are authorized to use in `dataset/videos/`, for example:
+**Clean rerun**: the real-time program APPENDS records. Use a fresh predictions filename for each run. The scorer warns and uses the last result for duplicate IDs; do not intentionally merge replicates.
 
-```text
-dataset/videos/test.mp4
-```
-
-## Running the Program
-
-Run all commands from the project root, for example `D:\CISC4000\project`. Ensure the script and video paths match your actual folder layout.
-
-### A. Evaluate one video
+## Score the recordings
 
 ```powershell
-python src\evaluate_realtime.py --video dataset\videos\test.mp4 --instruction "When you see a restroom sign, remind me that there is a restroom nearby." --output results\qwen38_realtime_predictions_test.jsonl
+python src/evaluate_metrics.py --annotations dataset/annotations.jsonl --predictions results/pilot_predictions.jsonl --output results/metrics_summary.json --csv results/per_video_metrics.csv --report results/evaluation_report.md
 ```
 
-Arguments:
+At 2 FPS, timestamps normally follow `0.0, 0.5, 1.0, 1.5, ...` seconds. Review the extracted sampled frames when annotating; a target that appears at 10.3 seconds in the original video may first be observable at 10.5 seconds.
 
-- `--video`: Path to a local video file.
-- `--instruction`: The pending instruction, sent once at the beginning of the session.
-- `--output`: JSONL file to which the result record will be appended.
+For positive videos, annotate the FIRST **sampled** frame where the condition is clearly satisfied (not the first unsampled original video frame). Use `trigger_end_time` for the last sampled time the condition remains satisfied. If the goal never occurs, set `positive:false`, both times `null`.
 
-Optional labels can be supplied after the ground-truth trigger time has been manually verified from the sampled frames:
+A positive video triggered within `[trigger_start_time, trigger_end_time]` is TP. An early or after-end one-shot trigger counts as **both FP and FN**, because it is an invalid alarm and the valid one-shot task is missed. A positive video with no trigger is FN; negative + trigger is FP; negative + no trigger is TN. Latency (seconds) is sampled-video trigger timestamp minus sampled-video GT start, **on true positives only**. `INVALID` responses are recorded separately, not treated as valid `WAIT`; check the protocol-quality count. The metrics measure trigger detection/timing; compare `expected_action` to `trigger_message` manually to evaluate reminder-content accuracy.
 
-```powershell
-python src\evaluate_realtime.py --video dataset\videos\test.mp4 --instruction "When you see a restroom sign, remind me that there is a restroom nearby." --positive true --ground-truth-trigger-time 10 --expected-action "Remind the user that a restroom store is nearby." --output results\qwen38_realtime_predictions_test.jsonl
-```
+Failed or missing prediction records are excluded from the headline performance metrics and shown in the summary; review excluded records before reporting performance. Because latency is measured on sampled-video timestamps, it does **not** equal end-to-end real-world user-notification time. The program separately logs model-response and elapsed wall-clock time.
 
-The value `10` is only an example. Do not use it unless the video has been inspected and the first clearly identifiable sampled frame has been confirmed as 10 seconds.
+## Important checks before collecting 30–40 videos
 
+1. Run five pilot recordings (landmark positive, negative, distractor, action, compositional).
+2. Check a real server returns `session.updated`, `input_audio_buffer.committed`, `response.done`, and `response.status=completed`.
+3. Check your chosen instruction mode actually preserves the pending instruction across frames.
+4. Inspect predictions and verify sampling timestamps visually before annotating all recordings.
+5. Keep model settings and FPS fixed across your primary benchmark.
 
-### Useful optional arguments
+**External validation status:** Offline unit tests for protocol-event handling and scoring pass. Live Alibaba API connection, available quota, and genuine recognition quality still need validation with your own account and G1 recordings.
 
-```text
---fps 1.0                     Target sampling/replay rate; default is 1 FPS
---timeout 90                  Timeout for API events, in seconds
---no-realtime-pacing          Process the next frame as soon as the previous decision returns
---video-id video_001          Set a sample ID in single-video mode
---positive true|false         Label a video as positive or negative
---ground-truth-trigger-time 27 Ground-truth trigger time, in seconds
---expected-action "..."       Expected reminder/action
-```
+Official Qwen docs: https://help.aliyun.com/zh/model-studio/client-events and https://help.aliyun.com/zh/model-studio/omni-realtime-interaction-process .
 
-## Output
+## Deviation from the original FYP plan
 
-The output is JSONL. Use a new output filename for each experimental run, or move/delete the previous file before a clean rerun. The program appends records rather than overwriting the file.
-
-Each record includes fields such as:
-
-- `video_id`, `video_path`, `model`, and `fps`;
-- `instruction`, `positive`, and `ground_truth_trigger_time`;
-- `predictions`: timestamp, raw model text, parsed decision, response status, response time, and encoded image size for each sampled frame;
-- `predicted_trigger_time` and `trigger_latency`;
-- `raw_api_events`: raw server events for debugging;
-- `reported_usage_sum_input_tokens`, `reported_usage_sum_output_tokens`, and `reported_usage_sum_total_tokens`;
-- `status` and `error`.
-
-The `reported_usage_sum_*` fields sum the per-response usage counters. Realtime responses may count historical context again on later turns, so these sums are not equivalent to deduplicated unique input tokens. Check actual usage and quota in the Alibaba Cloud console before scaling up the experiment.
+The advisor's initial written plan specifies approximately **1 FPS**. This revision intentionally uses **2 FPS** (one image every 0.5 seconds), which can improve capture of brief actions but increases frame/API requests and may increase cost. State the change explicitly in your methodology and obtain approval if the experimental setting must match the plan exactly. The system remains causal/sequential; frame-by-frame API waiting can cause real wall-clock delivery to fall behind a true 2 FPS stream.
